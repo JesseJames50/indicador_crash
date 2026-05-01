@@ -1,9 +1,8 @@
 """
-Monitor de Liquidez Sistêmica v5
-Correções de acurácia sobre v4:
-  1. Warmup limpo: min_periods = window completo (252d) — z-scores só após estabilização
-  2. Thresholds por rolling 3 anos (756d) em vez de expanding — sem âncora no passado distante
-  3. Velocidade: P90 + filtro mínimo absoluto 0.04 — elimina alertas de micro-impulsos
+Monitor de Liquidez Sistêmica v6
+Melhorias sobre v5:
+  E. Deadzoning por componente (z > 0.25) — score zero em regime neutro
+  F. Thresholds fixos calibrados no período 2018-2024 — sem deriva temporal
 """
 import streamlit as st
 import pandas as pd
@@ -16,15 +15,16 @@ from data_loader import merge_data
 from config import FRED_API_KEY, START_DATE
 
 # ─── Parâmetros ───────────────────────────────────────────────────────────────
-ROLL_WINDOW   = 252
-EMA_SPAN      = 21
-PERSIST_DAYS  = 3
-WARN_PCT      = 0.70   # percentil para threshold de atenção
-CRIT_PCT      = 0.90   # percentil para threshold crítico
-VEL_PCT       = 0.90   # 2: percentil de velocidade (mais restritivo que v4)
-VEL_MIN_ABS   = 0.04   # 2: variação mínima absoluta em 5 dias para alerta
-THRESH_WINDOW = 756    # 3: janela rolling de threshold (≈ 3 anos)
-THRESH_MINP   = 504    # 3: mínimo de observações para threshold (≈ 2 anos)
+ROLL_WINDOW  = 252
+EMA_SPAN     = 21
+PERSIST_DAYS = 3
+VEL_PCT      = 0.90    # percentil de velocidade
+VEL_MIN_ABS  = 0.04    # variação mínima absoluta em 5 dias para alerta velocidade
+DEADZONE     = 0.25    # E: z-score mínimo para contribuição por componente
+WARN_PCT     = 0.70    # F: percentil atenção no período de calibração
+CRIT_PCT     = 0.90    # F: percentil crítico no período de calibração
+CALIB_START  = "2018-01-01"  # F: início do período de referência para thresholds
+CALIB_END    = "2024-12-31"  # F: fim do período de referência
 
 # Pesos mantidos da v3
 WEIGHTS = {
@@ -142,38 +142,41 @@ def load_all() -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, list]:
     ind["curve_z"]   = zscore_rolling(-safe_col(df, "t10y2y"))
     ind["funding_z"] = zscore_rolling(safe_col(df, "sofr") - safe_col(df, "fed_funds"))
 
-    # ── A: Score — apenas contribuições positivas (clip individual) ───────────
+    # ── E: Score com deadzoning — cada componente só contribui se z > DEADZONE ─
     score, total_w = pd.Series(0.0, index=df.index), 0.0
     for comp_key, w in WEIGHTS.items():
         s = ind[comp_key]
         if s.notna().any():
-            score   += w * s.clip(lower=0).fillna(0)
+            score   += w * (s - DEADZONE).clip(lower=0).fillna(0)
             total_w += w
     ind["score_raw"] = score / total_w if total_w > 0 else score
 
     # EMA-21
     ind["score"] = ind["score_raw"].ewm(span=EMA_SPAN, adjust=False).mean()
 
-    # ── B: Thresholds rolling 3 anos — sem âncora no passado distante ───────
-    ind["thresh_warn"] = (ind["score"]
-                          .rolling(THRESH_WINDOW, min_periods=THRESH_MINP)
-                          .quantile(WARN_PCT))
-    ind["thresh_crit"] = (ind["score"]
-                          .rolling(THRESH_WINDOW, min_periods=THRESH_MINP)
-                          .quantile(CRIT_PCT))
+    # ── F: Thresholds fixos calibrados no período de referência ──────────────
+    calib_s = ind["score"].loc[CALIB_START:CALIB_END].dropna()
+    if len(calib_s) >= ROLL_WINDOW:
+        warn_fixed = float(calib_s.quantile(WARN_PCT))
+        crit_fixed = float(calib_s.quantile(CRIT_PCT))
+    else:
+        warn_fixed, crit_fixed = 0.20, 0.45   # fallback conservador
 
-    ind["alert_warn"] = persistence_signal(ind["score"] >= ind["thresh_warn"])
-    ind["alert_crit"] = persistence_signal(ind["score"] >= ind["thresh_crit"])
+    ind["thresh_warn"] = warn_fixed
+    ind["thresh_crit"] = crit_fixed
 
-    # ── C: Velocidade — P90 rolling + filtro mínimo absoluto ─────────────────
+    ind["alert_warn"] = persistence_signal(ind["score"] >= warn_fixed)
+    ind["alert_crit"] = persistence_signal(ind["score"] >= crit_fixed)
+
+    # ── C: Velocidade — P90 rolling 3a + filtro mínimo absoluto ─────────────
     ind["velocity"] = ind["score"].diff(5)
     vel_thresh = (ind["velocity"]
-                  .rolling(THRESH_WINDOW, min_periods=THRESH_MINP)
+                  .rolling(756, min_periods=504)
                   .quantile(VEL_PCT))
     ind["alert_velocity"] = (
         (ind["velocity"] >= vel_thresh) &
-        (ind["velocity"] >= VEL_MIN_ABS) &                    # filtro absoluto
-        (ind["score"]    >= ind["thresh_warn"].fillna(0) * 0.7)
+        (ind["velocity"] >= VEL_MIN_ABS) &
+        (ind["score"]    >= warn_fixed * 0.7)
     )
 
     # ── QQQ ───────────────────────────────────────────────────────────────────
@@ -192,12 +195,13 @@ def load_all() -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, list]:
 
 
 # ─── Layout ───────────────────────────────────────────────────────────────────
-st.set_page_config(layout="wide", page_title="Liquidity Monitor v5")
-st.title("📊 Monitor de Liquidez Sistêmica v5")
+st.set_page_config(layout="wide", page_title="Liquidity Monitor v6")
+st.title("📊 Monitor de Liquidez Sistêmica v6")
 st.caption(
-    f"Z-score rolante {ROLL_WINDOW}d (warmup completo) · EMA-{EMA_SPAN} · "
-    f"Thresholds P{int(WARN_PCT*100)}/P{int(CRIT_PCT*100)} rolling {THRESH_WINDOW}d · "
-    f"Velocidade P{int(VEL_PCT*100)} + mín {VEL_MIN_ABS} · Regime QE (WALCL)"
+    f"Z-score rolante {ROLL_WINDOW}d · EMA-{EMA_SPAN} · "
+    f"Deadzone z>{DEADZONE} · Thresholds P{int(WARN_PCT*100)}/P{int(CRIT_PCT*100)} "
+    f"fixos ({CALIB_START[:4]}–{CALIB_END[:4]}) · "
+    f"Velocidade P{int(VEL_PCT*100)}+mín {VEL_MIN_ABS} · QE (WALCL)"
 )
 
 df, ind, qqq, qe_periods = load_all()
@@ -207,8 +211,9 @@ score_raw_s  = ind["score_raw"].dropna()
 latest       = float(score_s.iloc[-1])
 latest_raw   = float(score_raw_s.iloc[-1])
 latest_vel   = float(ind["velocity"].dropna().iloc[-1])
-latest_warn  = float(ind["thresh_warn"].dropna().iloc[-1])
-latest_crit  = float(ind["thresh_crit"].dropna().iloc[-1])
+# thresholds fixos (escalares únicos para toda a série)
+warn_thresh  = float(ind["thresh_warn"].iloc[0])
+crit_thresh  = float(ind["thresh_crit"].iloc[0])
 in_crit      = bool(ind["alert_crit"].iloc[-1])
 in_warn      = bool(ind["alert_warn"].iloc[-1])
 in_vel       = bool(ind["alert_velocity"].iloc[-1])
@@ -218,10 +223,10 @@ status       = ("🔴 CRÍTICO"      if in_crit
                 else "🟢 Normal")
 
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Score EMA-21",        f"{latest:.3f}",      status)
-c2.metric("Threshold Atenção",   f"{latest_warn:.3f}", f"P{int(WARN_PCT*100)} histórico")
-c3.metric("Threshold Crítico",   f"{latest_crit:.3f}", f"P{int(CRIT_PCT*100)} histórico")
-c4.metric("Velocidade (5d)",     f"{latest_vel:+.3f}", "⚡ Alerta" if in_vel else "—")
+c1.metric("Score EMA-21",       f"{latest:.3f}",       status)
+c2.metric("Threshold Atenção",  f"{warn_thresh:.3f}",  f"P{int(WARN_PCT*100)} {CALIB_START[:4]}–{CALIB_END[:4]}")
+c3.metric("Threshold Crítico",  f"{crit_thresh:.3f}",  f"P{int(CRIT_PCT*100)} {CALIB_START[:4]}–{CALIB_END[:4]}")
+c4.metric("Velocidade (5d)",    f"{latest_vel:+.3f}",  "⚡ Alerta" if in_vel else "—")
 
 # ─── Helpers visuais ──────────────────────────────────────────────────────────
 _XAXIS  = dict(tickangle=-45, tickformat="%b/%y", showgrid=False)
@@ -264,22 +269,19 @@ def _add_events(fig, min_date):
         )
 
 
-def _add_dynamic_thresholds(fig, secondary_y: bool = False):
-    """B: thresholds como linhas dinâmicas em vez de linhas estáticas."""
-    tw = ind["thresh_warn"].dropna()
-    tc = ind["thresh_crit"].dropna()
-    kw = dict(secondary_y=secondary_y) if secondary_y else {}
-    fig.add_scatter(
-        x=tw.index, y=tw, mode="lines",
-        name=f"Atenção P{int(WARN_PCT*100)}",
-        line=dict(color="#f59e0b", width=1.0, dash="dash"),
-        **kw,
+def _add_thresholds(fig):
+    """F: thresholds fixos calibrados — linhas horizontais estáveis."""
+    fig.add_hline(
+        y=warn_thresh, line_dash="dash", line_color="#f59e0b",
+        annotation_text=f"Atenção P{int(WARN_PCT*100)} ({warn_thresh:.2f})",
+        annotation_position="top right",
+        annotation_font=dict(size=9),
     )
-    fig.add_scatter(
-        x=tc.index, y=tc, mode="lines",
-        name=f"Crítico P{int(CRIT_PCT*100)}",
-        line=dict(color="#ef4444", width=1.0, dash="dash"),
-        **kw,
+    fig.add_hline(
+        y=crit_thresh, line_dash="dash", line_color="#ef4444",
+        annotation_text=f"Crítico P{int(CRIT_PCT*100)} ({crit_thresh:.2f})",
+        annotation_position="top right",
+        annotation_font=dict(size=9),
     )
 
 
@@ -315,8 +317,8 @@ if not vel_vals.empty:
         marker=dict(color="#f97316", size=6, symbol="triangle-up"),
     )
 
-# Thresholds dinâmicos
-_add_dynamic_thresholds(fig_main)
+# Thresholds fixos calibrados
+_add_thresholds(fig_main)
 _add_events(fig_main, score_s.index.min())
 
 fig_main.update_layout(
@@ -425,19 +427,15 @@ if not qqq.empty:
 
 _add_events(fig_comp, score_s.index.min())
 
-tw = ind["thresh_warn"].dropna()
-tc = ind["thresh_crit"].dropna()
-fig_comp.add_trace(
-    go.Scatter(x=tw.index, y=tw, mode="lines",
-               name=f"Atenção P{int(WARN_PCT*100)}",
-               line=dict(color="#f59e0b", width=1.0, dash="dash")),
-    secondary_y=False,
+fig_comp.add_hline(
+    y=warn_thresh, line_dash="dash", line_color="#f59e0b",
+    annotation_text=f"Atenção ({warn_thresh:.2f})",
+    annotation_position="top right", annotation_font=dict(size=9),
 )
-fig_comp.add_trace(
-    go.Scatter(x=tc.index, y=tc, mode="lines",
-               name=f"Crítico P{int(CRIT_PCT*100)}",
-               line=dict(color="#ef4444", width=1.0, dash="dash")),
-    secondary_y=False,
+fig_comp.add_hline(
+    y=crit_thresh, line_dash="dash", line_color="#ef4444",
+    annotation_text=f"Crítico ({crit_thresh:.2f})",
+    annotation_position="top right", annotation_font=dict(size=9),
 )
 
 fig_comp.update_layout(
@@ -490,7 +488,7 @@ for i, (key, label, color, fill_color, weight) in enumerate(COMPONENTS):
         st.plotly_chart(fc, width="stretch")
 
 # ─── Backtest ─────────────────────────────────────────────────────────────────
-st.subheader(f"Backtest — threshold rolling P{int(CRIT_PCT*100)} ({THRESH_WINDOW}d) · antecipação até {LOOKBACK_DAYS}d")
+st.subheader(f"Backtest — threshold fixo P{int(CRIT_PCT*100)}={crit_thresh:.2f} · antecipação até {LOOKBACK_DAYS}d")
 
 data_start = ind.index.min()
 bt_rows    = []
