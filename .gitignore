@@ -1,0 +1,19 @@
+# Variáveis de ambiente — nunca commitar
+.env
+
+# Ambiente virtual Python
+env/
+venv/
+.venv/
+
+# Cache Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Streamlit
+.streamlit/secrets.toml
+
+# IDEs
+.vscode/
+.idea/
