@@ -1,10 +1,9 @@
 """
-Monitor de Liquidez Sistêmica v4
-Melhorias sobre v3:
-  A. Componentes clipados em zero — elimina distorção de spreads comprimidos por QE
-  B. Thresholds dinâmicos via percentil expandido (P70/P90) — elimina alarme crônico
-  C. Sinal de velocidade (diff 5d) — detecta acelerações bruscas de stress
-  D. Regime QE (WALCL) — shading visual dos períodos de distorção do Fed
+Monitor de Liquidez Sistêmica v5
+Correções de acurácia sobre v4:
+  1. Warmup limpo: min_periods = window completo (252d) — z-scores só após estabilização
+  2. Thresholds por rolling 3 anos (756d) em vez de expanding — sem âncora no passado distante
+  3. Velocidade: P90 + filtro mínimo absoluto 0.04 — elimina alertas de micro-impulsos
 """
 import streamlit as st
 import pandas as pd
@@ -17,12 +16,15 @@ from data_loader import merge_data
 from config import FRED_API_KEY, START_DATE
 
 # ─── Parâmetros ───────────────────────────────────────────────────────────────
-ROLL_WINDOW  = 252
-EMA_SPAN     = 21
-PERSIST_DAYS = 3
-WARN_PCT     = 0.70   # B: percentil para threshold de atenção
-CRIT_PCT     = 0.90   # B: percentil para threshold crítico
-VEL_PCT      = 0.85   # C: percentil para alerta de velocidade
+ROLL_WINDOW   = 252
+EMA_SPAN      = 21
+PERSIST_DAYS  = 3
+WARN_PCT      = 0.70   # percentil para threshold de atenção
+CRIT_PCT      = 0.90   # percentil para threshold crítico
+VEL_PCT       = 0.90   # 2: percentil de velocidade (mais restritivo que v4)
+VEL_MIN_ABS   = 0.04   # 2: variação mínima absoluta em 5 dias para alerta
+THRESH_WINDOW = 756    # 3: janela rolling de threshold (≈ 3 anos)
+THRESH_MINP   = 504    # 3: mínimo de observações para threshold (≈ 2 anos)
 
 # Pesos mantidos da v3
 WEIGHTS = {
@@ -56,13 +58,14 @@ LOOKBACK_DAYS = 45
 
 # ─── Funções de indicadores ───────────────────────────────────────────────────
 def zscore_rolling(series: pd.Series, window: int = ROLL_WINDOW) -> pd.Series:
-    roll = series.rolling(window, min_periods=window // 2)
+    # 1: min_periods = window completo — sem z-scores instáveis no warmup
+    roll = series.rolling(window, min_periods=window)
     std  = roll.std().where(lambda s: s > 0)
     return (series - roll.mean()) / std
 
 
 def kre_stress(kre: pd.Series, window: int = ROLL_WINDOW) -> pd.Series:
-    peak = kre.rolling(window, min_periods=window // 2).max()
+    peak = kre.rolling(window, min_periods=window).max()
     return -(kre - peak) / peak * 100
 
 
@@ -151,24 +154,26 @@ def load_all() -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, list]:
     # EMA-21
     ind["score"] = ind["score_raw"].ewm(span=EMA_SPAN, adjust=False).mean()
 
-    # ── B: Thresholds dinâmicos por percentil expandido ───────────────────────
+    # ── B: Thresholds rolling 3 anos — sem âncora no passado distante ───────
     ind["thresh_warn"] = (ind["score"]
-                          .expanding(min_periods=ROLL_WINDOW)
+                          .rolling(THRESH_WINDOW, min_periods=THRESH_MINP)
                           .quantile(WARN_PCT))
     ind["thresh_crit"] = (ind["score"]
-                          .expanding(min_periods=ROLL_WINDOW)
+                          .rolling(THRESH_WINDOW, min_periods=THRESH_MINP)
                           .quantile(CRIT_PCT))
 
     ind["alert_warn"] = persistence_signal(ind["score"] >= ind["thresh_warn"])
     ind["alert_crit"] = persistence_signal(ind["score"] >= ind["thresh_crit"])
 
-    # ── C: Velocidade do score ────────────────────────────────────────────────
+    # ── C: Velocidade — P90 rolling + filtro mínimo absoluto ─────────────────
     ind["velocity"] = ind["score"].diff(5)
-    vel_thresh = ind["velocity"].expanding(min_periods=ROLL_WINDOW).quantile(VEL_PCT)
-    # alerta de aceleração: velocidade alta E score já acima de 60% do threshold
+    vel_thresh = (ind["velocity"]
+                  .rolling(THRESH_WINDOW, min_periods=THRESH_MINP)
+                  .quantile(VEL_PCT))
     ind["alert_velocity"] = (
         (ind["velocity"] >= vel_thresh) &
-        (ind["score"]    >= ind["thresh_warn"].fillna(0) * 0.6)
+        (ind["velocity"] >= VEL_MIN_ABS) &                    # filtro absoluto
+        (ind["score"]    >= ind["thresh_warn"].fillna(0) * 0.7)
     )
 
     # ── QQQ ───────────────────────────────────────────────────────────────────
@@ -187,12 +192,12 @@ def load_all() -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, list]:
 
 
 # ─── Layout ───────────────────────────────────────────────────────────────────
-st.set_page_config(layout="wide", page_title="Liquidity Monitor v4")
-st.title("📊 Monitor de Liquidez Sistêmica v4")
+st.set_page_config(layout="wide", page_title="Liquidity Monitor v5")
+st.title("📊 Monitor de Liquidez Sistêmica v5")
 st.caption(
-    f"Z-score rolante {ROLL_WINDOW}d · EMA-{EMA_SPAN} · Componentes clipados · "
-    f"Thresholds P{int(WARN_PCT*100)}/P{int(CRIT_PCT*100)} dinâmicos · "
-    f"Velocidade {PERSIST_DAYS}d · Regime QE (WALCL)"
+    f"Z-score rolante {ROLL_WINDOW}d (warmup completo) · EMA-{EMA_SPAN} · "
+    f"Thresholds P{int(WARN_PCT*100)}/P{int(CRIT_PCT*100)} rolling {THRESH_WINDOW}d · "
+    f"Velocidade P{int(VEL_PCT*100)} + mín {VEL_MIN_ABS} · Regime QE (WALCL)"
 )
 
 df, ind, qqq, qe_periods = load_all()
@@ -485,7 +490,7 @@ for i, (key, label, color, fill_color, weight) in enumerate(COMPONENTS):
         st.plotly_chart(fc, width="stretch")
 
 # ─── Backtest ─────────────────────────────────────────────────────────────────
-st.subheader(f"Backtest — thresholds dinâmicos P{int(CRIT_PCT*100)} · antecipação até {LOOKBACK_DAYS}d")
+st.subheader(f"Backtest — threshold rolling P{int(CRIT_PCT*100)} ({THRESH_WINDOW}d) · antecipação até {LOOKBACK_DAYS}d")
 
 data_start = ind.index.min()
 bt_rows    = []
@@ -564,7 +569,7 @@ if total_days > 0:
     )
 
 # ─── Composição do score ──────────────────────────────────────────────────────
-st.subheader("Composição do score v4")
+st.subheader("Composição do score v5")
 
 st.dataframe(
     pd.DataFrame([
