@@ -8,6 +8,7 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import yfinance as yf
+from datetime import datetime
 from plotly.subplots import make_subplots
 from fredapi import Fred
 
@@ -100,7 +101,9 @@ def detect_qe_periods(walcl: pd.Series,
 
 
 # ─── Carregamento e cálculo ───────────────────────────────────────────────────
-@st.cache_data
+# TTL 12h: garante dados frescos tanto na abertura (~9h30 ET) quanto no
+# fechamento (~16h ET) — os dois janelas de maior estresse intraday.
+@st.cache_data(ttl=43200)
 def load_all() -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, list]:
     df   = merge_data()
     fred = Fred(api_key=FRED_API_KEY)
@@ -155,7 +158,7 @@ def load_all() -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, list]:
     ind["score"] = ind["score_raw"].ewm(span=EMA_SPAN, adjust=False).mean()
 
     # ── F: Thresholds fixos calibrados no período de referência ──────────────
-    calib_s = ind["score"].loc[CALIB_START:CALIB_END].dropna()
+    calib_s = ind["score"].loc[pd.Timestamp(CALIB_START):pd.Timestamp(CALIB_END)].dropna()
     if len(calib_s) >= ROLL_WINDOW:
         warn_fixed = float(calib_s.quantile(WARN_PCT))
         crit_fixed = float(calib_s.quantile(CRIT_PCT))
@@ -204,7 +207,17 @@ st.caption(
     f"Velocidade P{int(VEL_PCT*100)}+mín {VEL_MIN_ABS} · QE (WALCL)"
 )
 
+with st.sidebar:
+    if st.button("🔄 Forçar atualização", use_container_width=True,
+                 help="Recarrega todos os dados agora (TTL normal: 12h)"):
+        load_all.clear()
+        st.rerun()
+
 df, ind, qqq, qe_periods = load_all()
+st.caption(
+    f"Dados carregados em: **{datetime.now().strftime('%d/%m/%Y %H:%M')}** · "
+    "atualização automática a cada 12h (abertura ~9h30 ET e fechamento ~16h ET)"
+)
 
 score_s      = ind["score"].dropna()
 score_raw_s  = ind["score_raw"].dropna()
