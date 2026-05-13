@@ -34,16 +34,17 @@ CALIB_START   = "2018-01-01"
 CALIB_END     = "2024-12-31"
 LOOKBACK_DAYS = 180   # janela ampliada — captura sinais que se constroem ao longo de meses
 
-# v7 — incorpora MOVE (G), divergência MOVE/VIX (H), DXY (I), IG OAS (J)
+# v7 — incorpora MOVE (G), divergência MOVE/VIX (H), IG OAS (J)
+# DXY removido do score: em crises de confiança no dólar (Tarifas 2025)
+# o dólar cai, dxy_z fica negativo e penalizava o sinal — mantido só em Sinais Avançados
 WEIGHTS = {
-    "hy_z":       0.18,   # era 0.25 — complementado por ig_z
+    "hy_z":       0.21,   # +0.03 vs anterior (recupera sensibilidade a choques agudos)
     "ig_z":       0.07,   # J: IG OAS
     "move_z":     0.15,   # G: MOVE / vol realizada bonds
     "move_vix_z": 0.05,   # H: divergência MOVE/VIX
     "tbill_z":    0.15,   # era 0.20
-    "kre_z":      0.15,   # era 0.20
+    "kre_z":      0.17,   # +0.02 vs anterior (recupera sensibilidade a stress bancário)
     "curve_z":    0.12,   # era 0.15
-    "dxy_z":      0.05,   # I: fuga para dólar
     "vix_z":      0.05,   # era 0.10
     "t10y_z":     0.02,   # era 0.05
     "funding_z":  0.01,   # era 0.05
