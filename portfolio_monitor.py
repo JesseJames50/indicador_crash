@@ -269,9 +269,8 @@ def load_prices():
 # ─── Horário de mercado ───────────────────────────────────────────────────────
 def _market_info():
     from datetime import timezone
-    # Estimativa simples: ET = UTC-4 (horário de verão) ou UTC-5
-    utc_now  = datetime.utcnow()
-    et_now   = utc_now - timedelta(hours=4)   # ajuste fixo EST/EDT ≈ UTC-4
+    utc_now  = datetime.now(timezone.utc).replace(tzinfo=None)
+    et_now   = utc_now - timedelta(hours=4)   # EST/EDT fixo ≈ UTC-4
     brt_now  = utc_now - timedelta(hours=3)
     is_open  = (
         et_now.weekday() < 5 and
