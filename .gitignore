@@ -14,6 +14,9 @@ __pycache__/
 # Streamlit
 .streamlit/secrets.toml
 
+# Dados pessoais de carteira — nunca commitar
+positions.json
+
 # IDEs
 .vscode/
 .idea/

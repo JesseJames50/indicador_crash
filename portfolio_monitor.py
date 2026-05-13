@@ -7,7 +7,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-import requests, urllib3
+import requests, urllib3, json, os
 from datetime import datetime, timedelta
 from fredapi import Fred
 
@@ -280,28 +280,66 @@ def _market_info():
     return is_open, et_now, brt_now
 
 
+# ─── Persistência de posições ────────────────────────────────────────────────
+_POSITIONS_FILE = os.path.join(os.path.dirname(__file__), "positions.json")
+
+
+def _load_positions() -> dict:
+    """Lê positions.json; retorna dict vazio se não existir ou estiver corrompido."""
+    try:
+        with open(_POSITIONS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_positions(capital: int, vals: dict) -> str:
+    """Grava capital total e posições por ETF em positions.json."""
+    payload = {
+        "capital_total": capital,
+        "positions":     {t: int(v) for t, v in vals.items()},
+        "saved_at":      datetime.now().strftime("%d/%m/%Y %H:%M"),
+    }
+    with open(_POSITIONS_FILE, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    return payload["saved_at"]
+
+
 # ─── Layout ───────────────────────────────────────────────────────────────────
 st.set_page_config(layout="wide", page_title="Monitor de Risco + Carteira")
 st.title("📊 Monitor de Risco Sistêmico — Rebalanceamento de Carteira")
 
 # Sidebar
+_saved = _load_positions()
+
 with st.sidebar:
     st.subheader("⚙️ Configuração")
     capital_total = st.number_input(
-        "Capital total (R$)", min_value=1000, value=300_000, step=5000,
-        format="%d", help="Valor total investido na carteira")
+        "Capital total (R$)", min_value=1000, step=5000, format="%d",
+        value=_saved.get("capital_total", 300_000),
+        help="Valor total investido na carteira")
 
     st.markdown("---")
     st.subheader("📋 Posições atuais (R$)")
-    st.caption("Informe o valor atual de cada ETF ou deixe em branco para usar a alocação base (Atenção).")
 
-    base_alloc = TARGET_BY_REGIME["atencao"]
-    atual_vals = {}
+    _saved_pos   = _saved.get("positions", {})
+    _base_alloc  = TARGET_BY_REGIME["atencao"]
+    atual_vals   = {}
     for t, meta in ETF_META.items():
-        default_val = int(capital_total * base_alloc[t])
+        fallback = int(capital_total * _base_alloc[t])
         atual_vals[t] = st.number_input(
-            f"{t} — {meta['label']}", min_value=0,
-            value=default_val, step=100, format="%d", key=f"pos_{t}")
+            f"{t} — {meta['label']}", min_value=0, step=100, format="%d",
+            value=_saved_pos.get(t, fallback),
+            key=f"pos_{t}",
+            help=f"Peso base ({int(_base_alloc[t]*100)}%): R$ {fallback:,}")
+
+    if _saved.get("saved_at"):
+        st.caption(f"Última gravação: {_saved['saved_at']}")
+
+    if st.button("💾 Salvar posições", use_container_width=True,
+                 help="Grava capital e posições em positions.json"):
+        ts = _save_positions(int(capital_total), atual_vals)
+        st.success(f"Salvo em {ts}")
 
     st.markdown("---")
     col_a, col_b = st.columns(2)

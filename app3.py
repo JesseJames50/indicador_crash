@@ -34,7 +34,7 @@ DEADZONE_PER_COMP = {          # componentes mais ruidosos recebem deadzone maio
     "move_vix_z": 0.30,
 }
 WARN_PCT      = 0.70
-CRIT_PCT      = 0.90
+CRIT_PCT      = 0.92
 CALIB_START   = "2018-01-01"
 CALIB_END     = "2024-12-31"
 LOOKBACK_DAYS = 180   # janela ampliada — captura sinais que se constroem ao longo de meses
