@@ -28,6 +28,11 @@ PERSIST_DAYS  = 3
 VEL_PCT       = 0.90
 VEL_MIN_ABS   = 0.04
 DEADZONE      = 0.25
+DEADZONE_PER_COMP = {          # componentes mais ruidosos recebem deadzone maior
+    "move_z":     0.35,
+    "ig_z":       0.35,
+    "move_vix_z": 0.30,
+}
 WARN_PCT      = 0.70
 CRIT_PCT      = 0.90
 CALIB_START   = "2018-01-01"
@@ -134,7 +139,8 @@ def _build_score(ind: pd.DataFrame, weights: dict) -> pd.Series:
             continue
         s = ind[key]
         if s.notna().any():
-            score   += w * (s - DEADZONE).clip(lower=0).fillna(0)
+            dz = DEADZONE_PER_COMP.get(key, DEADZONE)
+            score   += w * (s - dz).clip(lower=0).fillna(0)
             total_w += w
     return score / total_w if total_w > 0 else score
 
@@ -339,7 +345,7 @@ def load_all():
 st.set_page_config(layout="wide", page_title="Liquidity Monitor v7")
 st.title("📊 Monitor de Liquidez Sistêmica v7 — Framework MOVE")
 st.caption(
-    f"Z-score {ROLL_WINDOW}d · EMA-{EMA_SPAN} · Deadzone z>{DEADZONE} · "
+    f"Z-score {ROLL_WINDOW}d · EMA-{EMA_SPAN} · Deadzone z>{DEADZONE} (MOVE/IG: z>0.35) · "
     f"Thresholds P{int(WARN_PCT*100)}/P{int(CRIT_PCT*100)} fixos "
     f"({CALIB_START[:4]}–{CALIB_END[:4]}) · "
     "Novos: MOVE · MOVE/VIX div · DXY · IG OAS"
