@@ -32,7 +32,7 @@ WARN_PCT      = 0.70
 CRIT_PCT      = 0.90
 CALIB_START   = "2018-01-01"
 CALIB_END     = "2024-12-31"
-LOOKBACK_DAYS = 45
+LOOKBACK_DAYS = 180   # janela ampliada — captura sinais que se constroem ao longo de meses
 
 # v7 — incorpora MOVE (G), divergência MOVE/VIX (H), DXY (I), IG OAS (J)
 WEIGHTS = {
@@ -175,7 +175,13 @@ def _quadrant_stats(move_z: pd.Series, vix_z: pd.Series,
     return result
 
 
-def _run_backtest(alert_series: pd.Series, data_start) -> list:
+def _run_backtest(alert_crit: pd.Series, data_start,
+                  alert_vel=None) -> list:
+    """
+    Retorna lista com detecção por evento.
+    alert_vel (opcional): alerta de velocidade usado como sinal de antecipação precoce.
+    alert_crit: threshold P90 usado como sinal de confirmação.
+    """
     rows = []
     for c_start, c_end, c_label in CRISIS_WINDOWS:
         ts_start = pd.Timestamp(c_start)
@@ -183,22 +189,35 @@ def _run_backtest(alert_series: pd.Series, data_start) -> list:
         pre_from = max(ts_start - pd.Timedelta(days=LOOKBACK_DAYS), data_start)
 
         if ts_end < data_start:
-            rows.append({"evento": c_label, "det": "⬜", "lead": None})
+            rows.append({"evento": c_label, "det": "⬜",
+                         "lead": None, "vel_lead": None})
             continue
 
-        pre_crit  = alert_series.loc[pre_from:ts_start]
-        cris_crit = alert_series.loc[ts_start:ts_end]
+        # ⚡ Velocidade: alerta precoce (ocorreu nos LOOKBACK dias antes?)
+        vel_lead = None
+        if alert_vel is not None:
+            pre_vel = alert_vel.loc[pre_from:ts_start]
+            if not pre_vel.empty and bool(pre_vel.any()):
+                first_vel = pre_vel[pre_vel].index[0]
+                vel_lead  = int((ts_start - first_vel).days)
+
+        # P90: confirmação
+        pre_crit  = alert_crit.loc[pre_from:ts_start]
+        cris_crit = alert_crit.loc[ts_start:ts_end]
 
         if not pre_crit.empty and bool(pre_crit.any()):
             first = pre_crit[pre_crit].index[0]
             rows.append({"evento": c_label, "det": "✅",
-                         "lead": int((ts_start - first).days)})
+                         "lead": int((ts_start - first).days),
+                         "vel_lead": vel_lead})
         elif not cris_crit.empty and bool(cris_crit.any()):
             first = cris_crit[cris_crit].index[0]
             rows.append({"evento": c_label, "det": "⚠️",
-                         "lead": -int((first - ts_start).days)})
+                         "lead": -int((first - ts_start).days),
+                         "vel_lead": vel_lead})
         else:
-            rows.append({"evento": c_label, "det": "❌", "lead": None})
+            rows.append({"evento": c_label, "det": "❌",
+                         "lead": None, "vel_lead": vel_lead})
     return rows
 
 
@@ -281,13 +300,22 @@ def load_all():
     ind["alert_crit"]    = persistence_signal(ind["score"]    >= crit_fixed)
     ind["v6_alert_crit"] = persistence_signal(ind["v6_score"] >= v6_crit)
 
-    # ── Velocidade ────────────────────────────────────────────────────────────
+    # ── Velocidade v7 ─────────────────────────────────────────────────────────
     ind["velocity"] = ind["score"].diff(5)
     vel_thresh = ind["velocity"].rolling(756, min_periods=504).quantile(VEL_PCT)
     ind["alert_velocity"] = (
         (ind["velocity"] >= vel_thresh) &
         (ind["velocity"] >= VEL_MIN_ABS) &
         (ind["score"]    >= warn_fixed * 0.7)
+    )
+
+    # ── Velocidade v6 (para comparação) ──────────────────────────────────────
+    ind["v6_velocity"] = ind["v6_score"].diff(5)
+    v6_vel_thresh = ind["v6_velocity"].rolling(756, min_periods=504).quantile(VEL_PCT)
+    ind["v6_alert_velocity"] = (
+        (ind["v6_velocity"] >= v6_vel_thresh) &
+        (ind["v6_velocity"] >= VEL_MIN_ABS) &
+        (ind["v6_score"]    >= v6_warn * 0.7)
     )
 
     # ── QQQ ───────────────────────────────────────────────────────────────────
@@ -640,138 +668,159 @@ for i, (key, label, color, fill_color, weight) in enumerate(COMPONENTS):
         st.plotly_chart(fc, width="stretch")
 
 # ─── Backtest v7 ──────────────────────────────────────────────────────────────
-st.subheader(f"Backtest v7 — threshold P{int(CRIT_PCT*100)}={crit_thresh:.2f} · antecipação até {LOOKBACK_DAYS}d")
+st.subheader(
+    f"Backtest v7 · janela {LOOKBACK_DAYS}d · "
+    "⚡ velocidade = alerta precoce · P90 = confirmação"
+)
+st.caption(
+    "Papéis distintos: ⚡ velocidade dispara quando o score ACELERA antes da crise atingir o threshold. "
+    f"P90={crit_thresh:.2f} dispara quando o stress já está confirmado em nível crítico."
+)
 
 data_start = ind.index.min()
-bt_rows    = []
-for c_start, c_end, c_label in CRISIS_WINDOWS:
-    ts_start = pd.Timestamp(c_start)
-    ts_end   = pd.Timestamp(c_end)
-    pre_from = max(ts_start - pd.Timedelta(days=LOOKBACK_DAYS), data_start)
 
-    if ts_end < data_start:
-        bt_rows.append({"Evento": c_label, "Detectado?": "⬜ Sem dados",
-                        "Antecipação (d)": "—", "Score máx. pré": "—",
-                        "Score máx. crise": "—", "⚡ Vel antes?": "—"})
-        continue
+# Executa backtest com os dois sinais
+bt_v7_full = _run_backtest(ind["alert_crit"], data_start, ind["alert_velocity"])
+bt_v6_full = _run_backtest(ind["v6_alert_crit"], data_start, ind["v6_alert_velocity"])
 
-    pre_score  = ind.loc[pre_from:ts_start,  "score"]
-    cris_score = ind.loc[ts_start:ts_end,    "score"]
-    pre_crit   = ind.loc[pre_from:ts_start,  "alert_crit"]
-    cris_crit  = ind.loc[ts_start:ts_end,    "alert_crit"]
-    pre_vel    = ind.loc[pre_from:ts_start,  "alert_velocity"]
+bt_rows = []
+for r in bt_v7_full:
+    ts_start   = pd.Timestamp(next(w[0] for w in CRISIS_WINDOWS if w[2] == r["evento"]))
+    ts_end     = pd.Timestamp(next(w[1] for w in CRISIS_WINDOWS if w[2] == r["evento"]))
+    pre_from   = max(ts_start - pd.Timedelta(days=LOOKBACK_DAYS), data_start)
+    pre_score  = ind.loc[pre_from:ts_start, "score"]
+    cris_score = ind.loc[ts_start:ts_end,   "score"]
 
-    if not pre_crit.empty and bool(pre_crit.any()):
-        first   = pre_crit[pre_crit].index[0]
-        lead    = int((ts_start - first).days)
-        det_str = "✅ Antecipado"
-    elif not cris_crit.empty and bool(cris_crit.any()):
-        first   = cris_crit[cris_crit].index[0]
-        lead    = -int((first - ts_start).days)
-        det_str = "⚠️ Durante"
-    else:
-        lead    = None
-        det_str = "❌ Não detectado"
+    vel_str  = (f"✅ {r['vel_lead']}d antes" if r["vel_lead"] is not None else "❌")
+    p90_str  = r["det"]
+    lead_str = (f"{r['lead']}d" if r["lead"] is not None
+                else "—")
 
     bt_rows.append({
-        "Evento":           c_label,
-        "Detectado?":       det_str,
-        "Antecipação (d)":  str(lead) if lead is not None else "—",
-        "Score máx. pré":   f"{pre_score.max():.3f}"  if not pre_score.empty  else "—",
-        "Score máx. crise": f"{cris_score.max():.3f}" if not cris_score.empty else "—",
-        "⚡ Vel antes?":     "✅" if bool(pre_vel.any()) else "❌",
+        "Evento":            r["evento"],
+        "⚡ Vel. pré-crise":  vel_str,
+        "P90 confirmação":   f"{p90_str} ({lead_str})",
+        "Score máx. pré":    f"{pre_score.max():.3f}"  if not pre_score.empty  else "—",
+        "Score máx. crise":  f"{cris_score.max():.3f}" if not cris_score.empty else "—",
     })
 
 st.dataframe(pd.DataFrame(bt_rows), width="stretch", hide_index=True,
              column_config={
                  "Evento":           st.column_config.TextColumn(width="medium"),
-                 "Detectado?":       st.column_config.TextColumn(width="small"),
-                 "Antecipação (d)":  st.column_config.TextColumn(width="small"),
+                 "⚡ Vel. pré-crise": st.column_config.TextColumn(width="medium"),
+                 "P90 confirmação":  st.column_config.TextColumn(width="medium"),
                  "Score máx. pré":   st.column_config.TextColumn(width="small"),
                  "Score máx. crise": st.column_config.TextColumn(width="small"),
-                 "⚡ Vel antes?":     st.column_config.TextColumn(width="small"),
              })
 
 buffer      = pd.Timedelta(days=30)
 crisis_mask = pd.Series(False, index=ind.index)
 for c_start, c_end, _ in CRISIS_WINDOWS:
     crisis_mask.loc[pd.Timestamp(c_start) - buffer : pd.Timestamp(c_end) + buffer] = True
-avail      = ind["alert_crit"].notna()
-total_days = int(avail.sum())
-v7_fp      = int((ind["alert_crit"]    & ~crisis_mask & avail).sum())
-v6_fp      = int((ind["v6_alert_crit"] & ~crisis_mask & avail).sum())
+avail        = ind["alert_crit"].notna()
+total_days   = int(avail.sum())
+v7_fp_crit   = int((ind["alert_crit"]         & ~crisis_mask & avail).sum())
+v7_fp_vel    = int((ind["alert_velocity"]      & ~crisis_mask & avail).sum())
+v6_fp_crit   = int((ind["v6_alert_crit"]       & ~crisis_mask & avail).sum())
+v6_fp_vel    = int((ind["v6_alert_velocity"]   & ~crisis_mask & avail).sum())
 
 if total_days > 0:
     st.markdown(
-        f"**Falsos positivos v7:** {v7_fp} dias ({v7_fp/total_days*100:.1f}%) &nbsp;|&nbsp; "
-        f"**Falsos positivos v6:** {v6_fp} dias ({v6_fp/total_days*100:.1f}%)"
+        f"**Falsos positivos (P90):** v6={v6_fp_crit}d ({v6_fp_crit/total_days*100:.1f}%) · "
+        f"v7={v7_fp_crit}d ({v7_fp_crit/total_days*100:.1f}%)  \n"
+        f"**Falsos positivos (⚡ vel.):** v6={v6_fp_vel}d ({v6_fp_vel/total_days*100:.1f}%) · "
+        f"v7={v7_fp_vel}d ({v7_fp_vel/total_days*100:.1f}%)"
     )
 
 # ─── Comparação estatística v6 → v7 ──────────────────────────────────────────
 st.subheader("Comparação Estatística v6 → v7")
-st.caption("Mesmo período histórico, mesmos thresholds P90 calibrados. Δ = dias adicionais de antecipação no v7.")
+st.caption(
+    "⚡ = alerta de velocidade (precoce) · P90 = confirmação crítica · "
+    f"Janela de antecipação: {LOOKBACK_DAYS}d · mesmo período histórico."
+)
 
-bt_v7 = _run_backtest(ind["alert_crit"],    data_start)
-bt_v6 = _run_backtest(ind["v6_alert_crit"], data_start)
-
+# bt_v7_full e bt_v6_full já foram calculados na seção de backtest acima
 comp_rows = []
-for r6, r7 in zip(bt_v6, bt_v7):
+for r6, r7 in zip(bt_v6_full, bt_v7_full):
+    # Velocidade: melhor lead time (vel_lead ou lead positivo)
+    v6_vel = f"✅ {r6['vel_lead']}d" if r6["vel_lead"] is not None else "❌"
+    v7_vel = f"✅ {r7['vel_lead']}d" if r7["vel_lead"] is not None else "❌"
+
+    # P90: lead time (positivo = antes, negativo = durante)
+    v6_p90 = f"{r6['det']} {r6['lead']}d" if r6["lead"] is not None else r6["det"]
+    v7_p90 = f"{r7['det']} {r7['lead']}d" if r7["lead"] is not None else r7["det"]
+
+    # Delta P90
     l6, l7 = r6["lead"], r7["lead"]
     if l6 is not None and l7 is not None:
-        delta = f"{l7 - l6:+d}d"
+        delta_p90 = f"{l7 - l6:+d}d"
     elif l6 is None and l7 is not None and l7 > 0:
-        delta = f"novo ✅ +{l7}d"
+        delta_p90 = f"novo ✅ +{l7}d"
     elif l6 is not None and l7 is None:
-        delta = "perdeu ❌"
+        delta_p90 = "perdeu ❌"
     else:
-        delta = "—"
+        delta_p90 = "—"
+
+    # Delta velocidade
+    vl6, vl7 = r6["vel_lead"], r7["vel_lead"]
+    if vl6 is not None and vl7 is not None:
+        delta_vel = f"{vl7 - vl6:+d}d"
+    elif vl6 is None and vl7 is not None:
+        delta_vel = f"novo ✅ +{vl7}d"
+    elif vl6 is not None and vl7 is None:
+        delta_vel = "perdeu ❌"
+    else:
+        delta_vel = "—"
+
     comp_rows.append({
-        "Evento":        r6["evento"],
-        "v6 det.":       r6["det"],
-        "v6 antecip.":   f"{l6}d" if l6 is not None else "—",
-        "v7 det.":       r7["det"],
-        "v7 antecip.":   f"{l7}d" if l7 is not None else "—",
-        "Δ antecipação": delta,
+        "Evento":       r6["evento"],
+        "v6 ⚡ vel.":   v6_vel,
+        "v6 P90":       v6_p90,
+        "v7 ⚡ vel.":   v7_vel,
+        "v7 P90":       v7_p90,
+        "Δ ⚡ vel.":    delta_vel,
+        "Δ P90":        delta_p90,
     })
 
 st.dataframe(pd.DataFrame(comp_rows), width="stretch", hide_index=True,
              column_config={
-                 "Evento":        st.column_config.TextColumn(width="medium"),
-                 "v6 det.":       st.column_config.TextColumn(width="small"),
-                 "v6 antecip.":   st.column_config.TextColumn(width="small"),
-                 "v7 det.":       st.column_config.TextColumn(width="small"),
-                 "v7 antecip.":   st.column_config.TextColumn(width="small"),
-                 "Δ antecipação": st.column_config.TextColumn(width="small"),
+                 "Evento":     st.column_config.TextColumn(width="medium"),
+                 "v6 ⚡ vel.": st.column_config.TextColumn(width="small"),
+                 "v6 P90":     st.column_config.TextColumn(width="small"),
+                 "v7 ⚡ vel.": st.column_config.TextColumn(width="small"),
+                 "v7 P90":     st.column_config.TextColumn(width="small"),
+                 "Δ ⚡ vel.":  st.column_config.TextColumn(width="small"),
+                 "Δ P90":      st.column_config.TextColumn(width="small"),
              })
 
-# Resumo estatístico
-v7_det  = sum(1 for r in bt_v7 if r["det"] == "✅")
-v6_det  = sum(1 for r in bt_v6 if r["det"] == "✅")
-v7_lds  = [r["lead"] for r in bt_v7 if r["lead"] is not None and r["lead"] > 0]
-v6_lds  = [r["lead"] for r in bt_v6 if r["lead"] is not None and r["lead"] > 0]
-n_ev    = len(CRISIS_WINDOWS)
+# ── Resumo estatístico ────────────────────────────────────────────────────────
+n_ev       = len(CRISIS_WINDOWS)
+v6_vel_det = sum(1 for r in bt_v6_full if r["vel_lead"] is not None)
+v7_vel_det = sum(1 for r in bt_v7_full if r["vel_lead"] is not None)
+v6_p90_det = sum(1 for r in bt_v6_full if r["det"] == "✅")
+v7_p90_det = sum(1 for r in bt_v7_full if r["det"] == "✅")
+v7_vel_lds = [r["vel_lead"] for r in bt_v7_full if r["vel_lead"] is not None]
+v6_vel_lds = [r["vel_lead"] for r in bt_v6_full if r["vel_lead"] is not None]
 
 col_a, col_b, col_c, col_d = st.columns(4)
-col_a.metric("Taxa de detecção v6",    f"{v6_det}/{n_ev}",
-             f"{v6_det/n_ev*100:.0f}%")
-col_b.metric("Taxa de detecção v7",    f"{v7_det}/{n_ev}",
-             f"{(v7_det - v6_det):+d} eventos",
-             delta_color="normal")
-col_c.metric("Antecipação média v6",
-             f"{sum(v6_lds)/len(v6_lds):.0f}d" if v6_lds else "—", "dias")
-col_d.metric("Antecipação média v7",
-             f"{sum(v7_lds)/len(v7_lds):.0f}d" if v7_lds else "—",
-             f"{(sum(v7_lds)/len(v7_lds) - sum(v6_lds)/len(v6_lds)):+.0f}d vs v6"
-             if v7_lds and v6_lds else "—",
+col_a.metric("⚡ Detecção veloc. v6", f"{v6_vel_det}/{n_ev}",
+             f"{v6_vel_det/n_ev*100:.0f}%")
+col_b.metric("⚡ Detecção veloc. v7", f"{v7_vel_det}/{n_ev}",
+             f"{v7_vel_det - v6_vel_det:+d} eventos", delta_color="normal")
+col_c.metric("⚡ Antecip. média v6",
+             f"{sum(v6_vel_lds)/len(v6_vel_lds):.0f}d" if v6_vel_lds else "—")
+col_d.metric("⚡ Antecip. média v7",
+             f"{sum(v7_vel_lds)/len(v7_vel_lds):.0f}d" if v7_vel_lds else "—",
+             (f"{sum(v7_vel_lds)/len(v7_vel_lds) - sum(v6_vel_lds)/len(v6_vel_lds):+.0f}d"
+              if v7_vel_lds and v6_vel_lds else "—"),
              delta_color="normal")
 
 if total_days > 0:
-    fp_delta = v7_fp - v6_fp
-    fp_color = "normal" if fp_delta <= 0 else "inverse"
+    fp_delta = v7_fp_crit - v6_fp_crit
     st.markdown(
-        f"**Falsos positivos:** v6 = {v6_fp}d ({v6_fp/total_days*100:.1f}%) · "
-        f"v7 = {v7_fp}d ({v7_fp/total_days*100:.1f}%) · "
-        f"Δ = **{fp_delta:+d} dias** "
+        f"**Falsos positivos P90:** v6={v6_fp_crit}d ({v6_fp_crit/total_days*100:.1f}%) · "
+        f"v7={v7_fp_crit}d ({v7_fp_crit/total_days*100:.1f}%) · "
+        f"Δ = **{fp_delta:+d}d** "
         f"({'✅ menos FP' if fp_delta < 0 else '⚠️ mais FP' if fp_delta > 0 else '= igual'})"
     )
 
