@@ -1,3 +1,4 @@
+import time
 import yfinance as yf
 import pandas as pd
 from fredapi import Fred
@@ -24,22 +25,37 @@ def get_yahoo_data():
     })
 
 
-def _get_fred_series(series_id: str, start: str = START_DATE) -> pd.Series:
-    """Busca série do FRED; retorna Series vazia em caso de falha."""
-    try:
-        return fred.get_series(series_id, observation_start=start)
-    except Exception as exc:
-        import streamlit as st
-        st.warning(f"FRED: não foi possível carregar '{series_id}' ({exc}). Série ignorada.")
-        return pd.Series(dtype=float, name=series_id)
+def _get_fred_series(series_id: str, start: str = START_DATE,
+                     retries: int = 2) -> pd.Series:
+    """Busca série do FRED com retry; retorna Series vazia após todas as tentativas."""
+    last_exc = None
+    for attempt in range(retries + 1):
+        try:
+            return fred.get_series(series_id, observation_start=start)
+        except Exception as exc:
+            last_exc = exc
+            if attempt < retries:
+                time.sleep(1.5)
+    import streamlit as st
+    st.warning(f"FRED: não foi possível carregar '{series_id}' ({last_exc}). Série ignorada.")
+    return pd.Series(dtype=float, name=series_id)
 
 
 def get_fred_data():
-    # SOFR só existe a partir de 04/2018; usar essa data evita erro 500 do FRED.
+    # FEDFUNDS (mensal) com fallback para DFF (diário) — mesmos dados, freq diferente
+    fed_funds = _get_fred_series("FEDFUNDS")
+    if fed_funds.dropna().empty:
+        fed_funds = _get_fred_series("DFF")   # Daily Federal Funds Rate
+
+    # SOFR só existe a partir de 04/2018
+    sofr = _get_fred_series("SOFR", start="2018-04-02")
+    if sofr.dropna().empty:
+        sofr = _get_fred_series("SOFR90DAYAVG", start="2018-04-02")
+
     return pd.DataFrame({
         'hy_spread': _get_fred_series("BAMLH0A0HYM2"),
-        'sofr':      _get_fred_series("SOFR", start="2018-04-02"),
-        'fed_funds': _get_fred_series("FEDFUNDS"),
+        'sofr':      sofr,
+        'fed_funds': fed_funds,
     })
 
 
