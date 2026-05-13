@@ -1,6 +1,18 @@
-# 📊 Monitor de Liquidez Sistêmica v6
+# Monitor de Liquidez Sistêmica — v7 + Monitor de Carteira
 
-Dashboard Streamlit para monitoramento contínuo do risco de crise financeira no mercado americano, baseado em 7 indicadores de estresse de liquidez.
+Dashboard Streamlit para monitoramento contínuo do risco de crise financeira no mercado americano, baseado em 10 indicadores de estresse de liquidez, com rebalanceamento dinâmico de portfólio.
+
+---
+
+## Arquivos principais
+
+| Arquivo | Descrição |
+|---|---|
+| `app_main.py` | **Painel unificado** — v6 + v7 + Comparação em três abas (recomendado) |
+| `portfolio_monitor.py` | **Monitor de carteira** — risco sistêmico + rebalanceamento dinâmico |
+| `app2.py` | Dashboard v6 standalone (baseline, 7 indicadores) |
+| `app3.py` | Dashboard v7 standalone (Framework MOVE, 10 indicadores) |
+| `backtest_carteira.py` | Backtest buy-and-hold da carteira sugerida (script de linha de comando) |
 
 ---
 
@@ -24,26 +36,116 @@ copy .env.example .env
 # edite .env e coloque sua chave: FRED_API_KEY=sua_chave_aqui
 # Chave gratuita em: https://fred.stlouisfed.org/docs/api/api_key.html
 
-# 5. Execute
-streamlit run app2.py
+# 5. Execute o painel de sua escolha
+streamlit run app_main.py          # painel unificado (recomendado)
+streamlit run portfolio_monitor.py # monitor de carteira
 ```
 
 O dashboard abre automaticamente em `http://localhost:8501`
 
+> Para deploy no Streamlit Community Cloud, consulte [DEPLOY.md](DEPLOY.md).
+
 ---
 
-## Como interpretar o dashboard
+## app_main.py — Painel Unificado (v6 + v7)
+
+Três abas em uma única tela, com um único carregamento de dados:
+
+### Aba v6 — Baseline (7 indicadores)
+
+O modelo original com sete componentes calibrados entre 2018-2024.
+
+| Indicador | Peso | O que capta |
+|---|---|---|
+| HY Spread de Crédito | 25% | Risco de crédito corporativo — principal preditor histórico |
+| T-Bill 3M Stress | 20% | Fuga para títulos de curto prazo — pânico de liquidez |
+| KRE — queda do pico | 20% | Deterioração do setor bancário regional |
+| Curva 10Y-2Y (invertida) | 15% | Preditor clássico de recessão (6-18 meses) |
+| VIX | 10% | Medo do mercado — sinal coincidente |
+| T-Note 10 anos | 5% | Nível de juros longos |
+| SOFR − Fed Funds | 5% | Stress no mercado overnight |
+
+### Aba v7 — Framework MOVE (10 indicadores)
+
+Incorpora volatilidade do mercado de bonds e spreads investment grade.
+
+| Indicador | Peso | O que capta |
+|---|---|---|
+| HY Spread de Crédito | 21% | Principal preditor cross-asset de recessão |
+| MOVE / Vol T10Y | 15% | Vol implícita de bonds — lidera o VIX em crises de funding |
+| T-Bill 3M Stress | 15% | Fuga para T-Bills |
+| KRE — queda do pico | 17% | Deterioração bancária gradual |
+| Curva 10Y-2Y (invertida) | 12% | Inversão da curva |
+| IG OAS | 7% | Spreads investment grade — divergência IG/HY sinaliza contágio |
+| Divergência MOVE/VIX | 5% | Bonds estressados antes das equities reagirem |
+| VIX | 5% | Confirmação coincidente |
+| T-Note 10 anos | 2% | Contexto macro |
+| SOFR − Fed Funds | 1% | Stress overnight |
+
+> **DXY removido do score:** em crises de confiança no dólar (Tarifas 2025), o dólar cai e penaliza o sinal. Mantido em **Sinais Avançados** para análise qualitativa.
+
+#### Melhorias do v7 vs v6 (backtest 2018-2026)
+
+| Métrica | v6 | v7 |
+|---|---|---|
+| Detecção precoce (velocidade) | 5/5 (100%) | 5/5 (100%) |
+| Antecipação média | 108 dias | 112 dias |
+| COVID — confirmação P92 | ⚠️ durante | ✅ 178 dias antes |
+| Bear Market 2022 — velocidade | 15 dias antes | 47 dias antes |
+| Falsos positivos P92 | 0,2% | 0,8% |
+
+### Aba Comparação
+
+Tabela lado a lado v6 → v7 por evento de crise, com delta de antecipação e resumo de falsos positivos.
+
+---
+
+## portfolio_monitor.py — Monitor de Carteira
+
+Dashboard de rebalanceamento que integra o score v7 com alocação dinâmica.
+
+### Como funciona
+
+1. **Detecta o regime** atual com base no score v7
+2. **Compara** suas posições atuais (informadas na sidebar) com a alocação alvo do regime
+3. **Indica** o que comprar, vender ou manter — em R$ e percentual
+
+### Níveis de risco e alocações alvo
+
+| Regime | Score | Core Growth | Defensivos | Renda Fixa | Proteção |
+|---|---|---|---|---|---|
+| 🟢 Normal | < P70 | 50% | 15% | 5% | 30% |
+| 🟡 Atenção | ≥ P70 (3d) | 40% | 20% | 18% | 22% |
+| ⚡ Aceleração | velocidade P90 | 30% | 24% | 20% | 26% |
+| 🔴 Crítico | ≥ P92 (3d) | 20% | 26% | 24% | 30% |
+
+### Carteira monitorada (11 ETFs)
+
+| Bloco | ETF | Descrição |
+|---|---|---|
+| Crescimento Core | SPY, QQQ, VTV | S&P 500, Nasdaq-100, Vanguard Value |
+| Setor Defensivo | XLP, XLV, XLU | Consumer Staples, Healthcare, Utilities |
+| Renda Fixa | IEF, SCHP | Treasuries 7-10a, TIPS |
+| Proteção Sistêmica | GLD, BIL, PDBC | Ouro, T-Bills 1-3m, Commodities |
+
+### Atualização automática
+
+- **Score v7:** a cada 6 horas — alinhado à abertura (~10h30 BRT) e fechamento (~17h BRT) do mercado americano
+- **Preços dos ETFs:** a cada 1 hora
+- **Refresh manual:** botões na sidebar
+
+---
+
+## Como interpretar o dashboard (app_main.py)
 
 ### Painel de métricas (4 cartões no topo)
 
 | Cartão | O que significa |
 |---|---|
-| **Score EMA-21** | Nível atual de estresse sistêmico. Parte de 0 em mercado calmo e sobe durante crises. Suavizado por média móvel de 21 dias para eliminar ruído. |
-| **Threshold Atenção** | Valor de referência para alerta amarelo. Foi o nível P70 (percentil 70) do score histórico entre 2018 e 2024 — ou seja, em 70% dos dias desse período o mercado estava mais tranquilo do que isso. |
-| **Threshold Crítico** | Valor de referência para alerta vermelho. Foi o P90 do mesmo período — apenas 10% dos dias históricos tiveram estresse acima desse nível, correspondendo às janelas de crise mapeadas. |
-| **Velocidade (5d)** | Variação do score nos últimos 5 dias. Positivo = estresse acelerando. O alerta ⚡ só dispara quando a aceleração é ao mesmo tempo rápida (P90 histórico) e expressiva (mínimo 0.04 em 5 dias). |
-
----
+| **Score EMA-21** | Nível atual de estresse sistêmico, suavizado por média móvel de 21 dias |
+| **Threshold Atenção** | P70 do score histórico 2018-2024 — 70% dos dias estiveram abaixo |
+| **Threshold Crítico** | P92 do mesmo período — apenas 8% dos dias históricos superaram esse nível |
+| **Velocidade (5d)** | Variação do score em 5 dias. Alerta ⚡ quando acelera acima do P90 histórico |
 
 ### Status do sistema
 
@@ -51,83 +153,67 @@ O dashboard abre automaticamente em `http://localhost:8501`
 |---|---|
 | 🟢 **Normal** | Score abaixo do threshold de atenção. Mercado em regime tranquilo. |
 | 🟡 **Atenção** | Score acima do P70 por 3+ dias consecutivos. Monitoramento diário recomendado. |
-| ⚡ **Aceleração** | Score subindo rapidamente mesmo sem cruzar o threshold crítico. Sinal de deterioração em curso — atenção redobrada. |
-| 🔴 **Crítico** | Score acima do P90 por 3+ dias consecutivos. Historicamente associado a eventos de crise. |
+| ⚡ **Aceleração** | Score subindo rapidamente — deterioração em curso antes de atingir o threshold crítico. |
+| 🔴 **Crítico** | Score acima do P92 por 3+ dias. Historicamente associado a eventos de crise. |
 
-> O filtro de **3 dias consecutivos** evita falsos alarmes causados por spikes isolados de um único dia.
-
----
+> O filtro de **3 dias consecutivos** evita falsos alarmes causados por spikes isolados.
 
 ### Gráfico principal — Score histórico
 
-- **Linha azul**: Score suavizado (EMA-21) — o indicador principal.
-- **Linha pontilhada cinza**: Score bruto antes da suavização — mostra a volatilidade real dos componentes.
-- **Triângulos laranja (⚡)**: Dias com alerta de aceleração.
-- **Faixas vermelhas**: Janelas de crise mapeadas (COVID, SVB, Tarifas, etc.) para referência visual.
-- **Faixas cinzas**: Períodos de QE ativo (expansão do balanço do Fed) — durante esses períodos os spreads ficam artificialmente comprimidos, o que reduz a sensibilidade do score.
-- **Linhas tracejadas**: Thresholds fixos de Atenção (amarelo) e Crítico (vermelho).
+- **Linha azul**: Score suavizado (EMA-21) — indicador principal
+- **Linha pontilhada cinza**: Score bruto — volatilidade real dos componentes
+- **Triângulos laranja (⚡)**: Dias com alerta de aceleração
+- **Faixas vermelhas**: Janelas de crise mapeadas
+- **Faixas cinzas**: Períodos de QE ativo (spreads artificialmente comprimidos)
+- **Linhas tracejadas**: Thresholds fixos de Atenção (amarelo) e Crítico (vermelho)
 
----
+### Sinais Avançados (aba v7)
 
-### Gráfico de Velocidade
+**Quadrante MOVE/VIX** — o mais valioso é o quadrante Q2:
 
-Mostra a variação do score em janelas de 5 dias:
-- **Barras azuis (acima de zero)**: score acelerando — estresse aumentando.
-- **Barras cinzas (abaixo de zero)**: score desacelerando — estresse diminuindo.
-- **Linha laranja pontilhada**: threshold P90 da velocidade. Quando ultrapassado junto com valor absoluto > 0.04 e score em zona de atenção, dispara o alerta ⚡.
-
----
-
-### Score vs QQQ
-
-Gráfico de eixo duplo comparando o score (azul, eixo esquerdo) com o preço do QQQ — ETF do Nasdaq-100 (verde, eixo direito). Permite visualizar se picos de estresse coincidiram ou anteciparam quedas no mercado.
-
-- **Pontos vermelhos sobre o QQQ**: dias em que o alerta crítico estava ativo.
-- O objetivo é que os picos do score apareçam *antes* das quedas do QQQ — sinalizando antecipação.
-
----
-
-### Painel de componentes (7 gráficos)
-
-Cada gráfico mostra a contribuição individual de um indicador ao score:
-- **Linha cinza clara**: z-score bruto do componente (pode ser negativo).
-- **Área colorida preenchida**: contribuição efetiva — só conta quando o z-score ultrapassa 0.25 (deadzone). Abaixo disso, o componente não contribui para o score.
-
-| Indicador | Peso | O que capta |
+| Quadrante | Condição | Interpretação |
 |---|---|---|
-| HY Spread de Crédito | 25% | Risco de crédito corporativo — principal preditor histórico de recessão |
-| T-Bill 3M Stress | 20% | Fuga para títulos do Tesouro de curto prazo — sinal de pânico de liquidez |
-| KRE — queda do pico | 20% | Deterioração do setor bancário regional — capturou SVB antes do colapso |
-| Curva 10Y-2Y (invertida) | 15% | Inversão da curva de juros — preditor clássico de recessão com 6–18 meses de antecedência |
-| VIX | 10% | Medo do mercado — sinal coincidente (não antecipa, confirma) |
-| T-Note 10 anos | 5% | Nível de juros longos — contexto macroeconômico |
-| SOFR − Fed Funds | 5% | Stress no mercado overnight — histórico mais curto (desde 2018) |
+| Q2 ⚠️ | MOVE ↑ VIX ↓ | Bonds estressados, equities calmas — antecipação de stress |
+| Q1 🔴 | MOVE ↑ VIX ↑ | Ambos estressados — crise sistêmica confirmada |
+| Q3 🟡 | MOVE ↓ VIX ↑ | Stress isolado em equities |
+| Q4 🟢 | MOVE ↓ VIX ↓ | Regime calmo — melhor ambiente para risco |
 
----
-
-### Tabela de backtest
-
-Resume o desempenho do score nas 5 crises mapeadas:
+### Backtest (aba v7)
 
 | Coluna | Significado |
 |---|---|
-| **Detectado?** | ✅ Antecipado = alerta antes do evento; ⚠️ Durante = detectou mas só durante; ❌ Não detectado |
-| **Antecipação (dias)** | Quantos dias antes do evento o alerta crítico disparou. Negativo = detectou depois |
-| **Score máx. pré** | Score máximo nos 45 dias antes do evento |
+| **⚡ Vel. pré-crise** | Alerta de velocidade disparou antes do evento (sinal precoce) |
+| **P90 confirmação** | Threshold P92 cruzado antes (✅), durante (⚠️) ou não detectado (❌) |
+| **Score máx. pré** | Score máximo nos 180 dias antes do evento |
 | **Score máx. crise** | Score máximo durante a janela de crise |
-| **⚡ Velocidade antes?** | Se o alerta de aceleração disparou antes do evento |
 
-Abaixo da tabela: percentual de **falsos positivos** — dias em que o alerta estava ativo fora de qualquer janela de crise mapeada.
+---
+
+## backtest_carteira.py — Backtest da Carteira
+
+Script de linha de comando que baixa 1 ano de dados e calcula o desempenho da carteira:
+
+```bash
+python backtest_carteira.py
+```
+
+Saída: retorno em USD e BRL por ETF, volatilidade anual, max drawdown, Sharpe ratio e alpha vs SPY.
+
+> **Nota de execução:** use o Python do Anaconda base (`python`) ou configure o ambiente virtual com SSL válido. O script usa a API do Yahoo Finance diretamente (bypass SSL corporativo).
 
 ---
 
 ## Atualização dos dados
 
-Os dados são **recarregados automaticamente a cada 12 horas**, sincronizando com:
-- **Abertura do mercado americano** (~9h30 ET / ~10h30 horário de Brasília)
-- **Fechamento do mercado americano** (~16h ET / ~17h horário de Brasília)
+Os dados são recarregados automaticamente:
 
-Para forçar uma atualização imediata, use o botão **🔄 Forçar atualização** na barra lateral.
+| Dashboard | Frequência | Horários (BRT) |
+|---|---|---|
+| app_main.py | A cada 12h | ~10h30 e ~22h30 |
+| portfolio_monitor.py (score) | A cada 6h | ~10h30, ~16h30, ~22h30, ~04h30 |
+| portfolio_monitor.py (preços) | A cada 1h | Continuamente |
+
+Para forçar atualização imediata: botão **🔄 Forçar atualização** na sidebar.
 
 ---
 
@@ -135,12 +221,27 @@ Para forçar uma atualização imediata, use o botão **🔄 Forçar atualizaç�
 
 | Dado | Fonte | Frequência |
 |---|---|---|
-| HY Spread (`BAMLH0A0HYM2`) | FRED — Federal Reserve | Diária |
+| HY Spread (`BAMLH0A0HYM2`) | FRED | Diária |
+| IG OAS (`BAMLC0A0CM`) | FRED | Diária |
 | T-Bill 3M (`DTB3`) | FRED | Diária |
 | Curva 10Y-2Y (`T10Y2Y`) | FRED | Diária |
 | SOFR, Fed Funds (`SOFR`, `FEDFUNDS`) | FRED | Diária / Mensal |
 | Balanço do Fed (`WALCL`) | FRED | Semanal |
+| MOVE Index (`^MOVE`) | Yahoo Finance | Diária |
 | KRE, VIX, QQQ, T-Note (`^TNX`) | Yahoo Finance | Diária |
+| ETFs da carteira (SPY, QQQ, …) | Yahoo Finance | Diária |
+| USD/BRL (`USDBRL=X`) | Yahoo Finance | Diária |
+
+---
+
+## Deploy no Streamlit Community Cloud
+
+Consulte [DEPLOY.md](DEPLOY.md) para o guia completo passo-a-passo.
+
+Resumo:
+1. Fork do repositório no GitHub
+2. Deploy em [share.streamlit.io](https://share.streamlit.io) apontando para `app_main.py`
+3. Configurar `FRED_API_KEY` em **Settings → Secrets**
 
 ---
 
