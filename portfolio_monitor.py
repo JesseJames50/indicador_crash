@@ -534,36 +534,40 @@ with st.expander("📋 Tabela de alocações alvo por regime — visão completa
     )
 
 # ── Legenda de risco ──────────────────────────────────────────────────────────
+# Todos os 4 cards em um único st.markdown para evitar falha de renderização
+# HTML em colunas subsequentes (bug de st.columns + unsafe_allow_html em loop)
 st.markdown("---")
 st.subheader("🗺️ Legenda — Níveis de Risco Sistêmico")
 
-leg_cols = st.columns(4)
-for col, (r_key, r_cfg) in zip(leg_cols, REGIME_CFG.items()):
-    alvo = TARGET_BY_REGIME[r_key]
-    core_pct      = sum(alvo[t] for t in ["SPY","QQQ","VTV"]) * 100
-    def_pct       = sum(alvo[t] for t in ["XLP","XLV","XLU"]) * 100
-    fi_pct        = sum(alvo[t] for t in ["IEF","SCHP"]) * 100
-    prot_pct      = sum(alvo[t] for t in ["GLD","BIL","PDBC"]) * 100
-    is_active     = (r_key == regime)
-    bdr = f"3px solid {r_cfg['cor']}" if is_active else f"1px solid {r_cfg['borda']}"
-    col.markdown(
-        f"""<div style="border:{bdr};border-radius:10px;padding:14px 12px;
-            background:{r_cfg['bg']};height:100%">
-        <div style="font-size:1.1rem;font-weight:700;color:{r_cfg['cor']};margin-bottom:6px">
-            {r_cfg['emoji']} {r_cfg['titulo']}
-            {'<br><span style="font-size:0.72rem;color:#6b7280">← REGIME ATUAL</span>' if is_active else ''}
-        </div>
-        <div style="font-size:0.82rem;color:#374151;margin-bottom:10px">{r_cfg['desc'][:120]}...</div>
-        <hr style="border:none;border-top:1px solid {r_cfg['borda']};margin:8px 0">
-        <div style="font-size:0.82rem">
-            📈 Core Growth: <b>{core_pct:.0f}%</b><br>
-            🛡️ Defensivos: <b>{def_pct:.0f}%</b><br>
-            💵 Renda Fixa: <b>{fi_pct:.0f}%</b><br>
-            🔒 Proteção: <b>{prot_pct:.0f}%</b>
-        </div>
-        </div>""",
-        unsafe_allow_html=True
+_cards_html = '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:4px">'
+for r_key, r_cfg in REGIME_CFG.items():
+    alvo     = TARGET_BY_REGIME[r_key]
+    core_pct = sum(alvo[t] for t in ["SPY","QQQ","VTV"]) * 100
+    def_pct  = sum(alvo[t] for t in ["XLP","XLV","XLU"]) * 100
+    fi_pct   = sum(alvo[t] for t in ["IEF","SCHP"])       * 100
+    prot_pct = sum(alvo[t] for t in ["GLD","BIL","PDBC"]) * 100
+    is_act   = (r_key == regime)
+    bdr      = f"3px solid {r_cfg['cor']}" if is_act else f"1px solid {r_cfg['borda']}"
+    atual_tag = (
+        f'<br><span style="font-size:0.70rem;color:{r_cfg["cor"]}'
+        f';font-weight:600">&#8592; REGIME ATUAL</span>'
+        if is_act else ""
     )
+    _cards_html += (
+        f'<div style="border:{bdr};border-radius:10px;padding:14px 12px;background:{r_cfg["bg"]}">'
+        f'<div style="font-size:1.05rem;font-weight:700;color:{r_cfg["cor"]};margin-bottom:6px">'
+        f'{r_cfg["emoji"]} {r_cfg["titulo"]}{atual_tag}</div>'
+        f'<div style="font-size:0.80rem;color:#374151;margin-bottom:10px">'
+        f'{r_cfg["desc"][:130]}...</div>'
+        f'<div style="border-top:1px solid {r_cfg["borda"]};padding-top:8px;font-size:0.82rem">'
+        f'Core Growth: <b>{core_pct:.0f}%</b><br>'
+        f'Defensivos: <b>{def_pct:.0f}%</b><br>'
+        f'Renda Fixa: <b>{fi_pct:.0f}%</b><br>'
+        f'Protecao: <b>{prot_pct:.0f}%</b>'
+        f'</div></div>'
+    )
+_cards_html += '</div>'
+st.markdown(_cards_html, unsafe_allow_html=True)
 
 # ── Nota de atualização ───────────────────────────────────────────────────────
 st.markdown("---")
